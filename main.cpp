@@ -1,156 +1,169 @@
 #include <exception>
+#include <filesystem>
 #include <iostream>
+#include <map>
+#include <optional>
+#include <string>
+#include <tuple>
 #include <type_traits>
+#include <vector>
 
-#include "reflect.h"
-#include "reflect_dynamic.h"
-#include "reflect_json.h"
+#include "SerdeADT.h"
+#include "Reflect.h"
+#include "SerdeEngine.h"
+#include "SerdeServer.h"
 
-struct Person
+// ========================= 真实复杂对象（游戏存档场景） =========================
+using Inventory = std::map<std::string, int>;
+
+struct Stat
 {
-    REFLECT_STATIC_CLASS();
-
-    std::string name;
-    int age     = 0;
-    bool gender = false;
-
-    void Introduce() const
-    {
-        std::cout << "Hi, I'm " << name << " and I'm " << age << " years old.\n";
-    }
-
-    int GetAge() const { return age; }
-
-    void SetAge(int new_age) { age = new_age; }
+    REFLECT_CLASS(Stat, ReflectNullBase);
+    REFLECT_FIELDS(
+        (int, hp),
+        (int, mp),
+        (int, attack),
+        (int, defense)
+    );
 };
 
-BEGIN_CLASS(Person, NullBase)
-    FUNCTIONS(
-        FUNCTION_FIELD(&Person::Introduce),
-        FUNCTION_FIELD(&Person::GetAge),
-        FUNCTION_FIELD(&Person::SetAge)
-    )
-    VARIABLES(
-        VARIABLE_FIELD(&Person::name),
-        VARIABLE_FIELD(&Person::age),
-        VARIABLE_FIELD(&Person::gender)
-    )
-END_CLASS(Person);
-
-// 派生类：验证继承反射
-struct Student : Person
+struct Skill
 {
-    REFLECT_STATIC_CLASS();
+    REFLECT_CLASS(Skill, ReflectNullBase);
+    REFLECT_FIELDS(
+        (std::string, name),
+        (int,         level),
+        (double,      cooldown)
+    );
 
-    std::string school;
+    void Upgrade() { ++level; }
+    REFLECT_FUNCTIONS(Upgrade);
 };
 
-BEGIN_CLASS(Student, Person)
-    FUNCTIONS()
-    VARIABLES(
-        VARIABLE_FIELD(&Student::school)
-    )
-END_CLASS(Student);
+struct Position
+{
+    REFLECT_CLASS(Position, ReflectNullBase);
+    REFLECT_FIELDS(
+        (double, x),
+        (double, y),
+        (double, z)
+    );
+};
+
+struct Character
+{
+    REFLECT_CLASS(Character, ReflectNullBase);
+
+    REFLECT_FIELDS(
+        (std::string,                name),
+        (int,                        level),
+        (Stat,                       baseStat),
+        (std::vector<Skill>,         skills),
+        (Inventory,                  inventory),
+        (std::optional<std::string>, guild),
+        (Position,                   position)
+    );
+
+    void LevelUp() { ++level; }
+    int  GetLevel() const { return level; }
+    void AddSkill(const Skill &s) { skills.push_back(s); }
+    void Rename(const std::string &newName) { name = newName; }
+
+    REFLECT_FUNCTIONS(LevelUp, GetLevel, AddSkill, Rename);
+};
 
 int main()
 {
-    // ---- 编译期校验：FunctionTraits 萃取是否正确 ----
-    static_assert(std::is_same_v<Core::FunctionTraits<decltype(&Person::Introduce)>::return_type, void>);
-    static_assert(Core::FunctionTraits<decltype(&Person::Introduce)>::is_const);
-    static_assert(Core::FunctionTraits<decltype(&Person::Introduce)>::arity == 0);
-
-    static_assert(!Core::FunctionTraits<decltype(&Person::SetAge)>::is_const);
-    static_assert(Core::FunctionTraits<decltype(&Person::SetAge)>::arity == 1);
-
-    static_assert(std::is_same_v<Core::FunctionTraits<decltype(&Person::GetAge)>::return_type, int>);
-    static_assert(std::is_same_v<Core::FunctionTraits<decltype(&Person::GetAge)>::class_type, Person>);
+    // ---- 编译期校验 ----
+    static_assert(core::ReflectTypeInfo<Character>::Name == "Character");
+    static_assert(std::tuple_size_v<decltype(core::ReflectTypeInfo<Character>::Variables)> == 7);
+    static_assert(std::tuple_size_v<decltype(core::ReflectTypeInfo<Character>::Functions)> == 4);
+    static_assert(core::ReflectFunctionTraits<decltype(&Character::GetLevel)>::IsConst);
+    static_assert(core::ReflectFunctionTraits<decltype(&Character::Rename)>::Arity == 1);
 
     std::cout << std::boolalpha;
 
-    // 格式无关：这里选 JSON 解析器；换 XML/YAML/INI 只需换一个 Parser 子类
-    Core::JsonParser parser;
+    Character hero{
+        "Hero", 42,
+        Stat{ 1000, 500, 120, 80 },
+        { Skill{ "Fireball", 3, 2.5 }, Skill{ "IceBolt", 1, 1.0 } },
+        Inventory{ { "gold", 999 }, { "potion", 20 } },
+        std::optional<std::string>{ "GuildOfHeroes" },
+        Position{ 10.5, 20.0, -3.0 }
+    };
 
-    Person alice{"Alice", 30, true};
+    // ============ 一、文件测试：对象 -> SerdeADT -> 文件 -> 对象 ============
+    core::SerdeADT adt = core::toAdt(hero);
 
-    // 1. 类名
-    std::cout << "Class name: " << Person::StaticClass().GetClassName() << "\n\n";
+    auto root = std::filesystem::temp_directory_path() / "serde_demo";
+    auto &server = core::SerdeServer::self();
+    server.setRoot(root);
+    core::Tag key{ { "Saved", "Player", "Hero" } };
 
-    // 2. 遍历成员变量
-    std::cout << "Member variables:\n";
-    Person::StaticClass().ForEachMembers(alice, [](const char *name, auto &value)
-    {
-        std::cout << "  " << name << " = " << value << "\n";
-    });
+    auto rj = server.serialize(adt, key, core::ESerdeBackend::Json, core::ESerdeMode::Overwrite);
+    auto rt = server.serialize(adt, key, core::ESerdeBackend::Toml, core::ESerdeMode::Overwrite);
 
-    // 3. 遍历成员函数元信息
-    std::cout << "\nMember functions:\n";
-    Person::StaticClass().ForEachFunction([](const auto &field)
-    {
-        std::cout << "  " << field.name
-            << " | const=" << field.IsConst()
-            << " | arity=" << field.GetArity()
-            << " | is_function=" << field.IsFunction() << "\n";
-    });
+    std::cout << "== 文件测试 ==\n"
+              << "  JSON 写入: " << (rj ? "ok" : rj.error()) << "  "
+              << (root / "Saved/Player/Hero.json").string() << "\n"
+              << "  TOML 写入: " << (rt ? "ok" : rt.error()) << "  "
+              << (root / "Saved/Player/Hero.toml").string() << "\n";
 
-    // 4. 反射驱动序列化（对象 -> DynamicValue -> 文本，格式由 parser 决定）
-    auto dv = Core::ToDynamicObject(alice);
-    std::cout << "\nSerialize (JSON):\n" << parser.Serialize(dv) << "\n";
+    auto lj = server.deserialize(key, core::ESerdeBackend::Json);
+    auto pj = lj ? core::fromAdt<Character>(*lj) : std::expected<Character, std::string>{ std::unexpect, lj.error() };
+    auto lt = server.deserialize(key, core::ESerdeBackend::Toml);
+    auto pt = lt ? core::fromAdt<Character>(*lt) : std::expected<Character, std::string>{ std::unexpect, lt.error() };
 
-    // 5. 继承反射：Student 应包含 Person 的字段
-    Student bob{{"Bob", 18, false}, "Tsinghua"};
-    std::cout << "\nStudent class: " << Student::StaticClass().GetClassName() << "\n";
-    Student::StaticClass().ForEachMembers(bob, [](const char *name, auto &value)
-    {
-        std::cout << "  " << name << " = " << value << "\n";
-    });
+    std::cout << "  JSON 回环: " << (pj ? (pj->name + " lv" + std::to_string(pj->level) + " hp" + std::to_string(pj->baseStat.hp)
+                                      + " gold" + std::to_string(pj->inventory["gold"]) + " guild@" + pj->guild.value_or("<none>")
+                                      + " (" + std::to_string(pj->position.x) + "," + std::to_string(pj->position.y) + ")")
+                                        : pj.error()) << "\n";
+    std::cout << "  TOML 回环: " << (pt ? (pt->name + " lv" + std::to_string(pt->level) + " hp" + std::to_string(pt->baseStat.hp)
+                                      + " skills=" + std::to_string(pt->skills.size()))
+                                        : pt.error()) << "\n\n";
 
-    // 6. 调用普通成员函数（对照）
-    alice.Introduce();
+    // ============ 二、反射测试：字符串构造 / 访问成员 / 调用方法 ============
+    core::registerReflect<Character>();
+    core::registerReflect<Skill>();
+    auto &reg = core::ReflectRegistry::self();
 
-    // ================= 运行时反射：字符串构造 / 字符串调用 =================
-    std::cout << "\n================ Runtime reflection (string-based) ================\n";
+    // 1) 字符串构造对象
+    auto obj = reg.create("Character", adt);
+    std::cout << "== 反射测试 ==\n"
+              << "  字符串构造: name=" << reg.get("Character", "name", obj).asString()
+              << ", level=" << reg.get("Character", "level", obj).asInt() << "\n";
 
-    Core::RegisterType<Person>();
-    Core::RegisterType<Student>();
+    // 2) 字符串访问成员（读）
+    auto skill0 = reg.get("Character", "skills", obj);           // vector<Skill> -> ADT array
+    std::cout << "  字符串访问成员: skills[0].name=" << skill0.asArray()[0].find("name")->asString()
+              << ", skills 数量=" << skill0.asArray().size() << "\n";
 
-    auto &reg = Core::TypeRegistry::Instance();
+    // 3) 字符串访问成员（写）
+    reg.set("Character", "level", obj, core::SerdeADT{ std::int64_t{ 99 } });
+    std::cout << "  字符串写成员: level -> " << reg.get("Character", "level", obj).asInt() << "\n";
 
-    // 7. 字符串 -> 默认构造对象
-    auto p1                      = reg.Create("Person");
-    p1.Cast<Person>().name = "Default";
-    std::cout << "Create(\"Person\") -> name='" << p1.Cast<Person>().name << "'\n";
+    // 4) 字符串调用成员方法（无参 / 带参 / 返回值）
+    core::SerdeADT emptyArgs{ core::SerdeArray{} };
+    reg.invoke("Character", "LevelUp", obj, emptyArgs);   // 无参、void
+    std::cout << "  字符串调用 LevelUp: level -> "
+              << reg.invoke("Character", "GetLevel", obj, emptyArgs).asInt() << "\n";
 
-    // 8. 字符串(JSON) -> 带参构造（DynamicValue 对象按字段名赋值）
-    auto p2 = reg.Create("Person", parser.Parse(R"({"name":"Carol","age":25,"gender":false})"));
-    std::cout << "Create(\"Person\", {...}) -> "
-        << p2.Cast<Person>().name
-        << ", age=" << p2.Cast<Person>().age << "\n";
+    Skill newSkill{ "Thunder", 1, 3.0 };
+    core::SerdeADT addArgs{ core::SerdeArray{ core::toAdt(newSkill) } };
+    reg.invoke("Character", "AddSkill", obj, addArgs);    // 带参（Skill 对象）
+    std::cout << "  字符串调用 AddSkill: skills 数量 -> "
+              << reg.get("Character", "skills", obj).asArray().size() << "\n";
 
-    // 9. 字符串 -> 调用无参函数（返回值 Value）
-    auto age = reg.Invoke("Person", "GetAge", p2, parser.Parse("[]"));
-    std::cout << "Invoke(\"GetAge\") = " << age.Cast<int>() << "\n";
+    reg.invoke("Character", "Rename", obj, core::SerdeADT{ core::SerdeArray{ core::SerdeADT{ "HeroRenamed" } } });
+    std::cout << "  字符串调用 Rename: name -> "
+              << reg.get("Character", "name", obj).asString() << "\n";
 
-    // 10. 字符串 -> 调用带参函数
-    reg.Invoke("Person", "SetAge", p2, parser.Parse("[31]"));
-    std::cout << "Invoke(\"SetAge\", [31]) -> age = "
-        << reg.Invoke("Person", "GetAge", p2, parser.Parse("[]")).Cast<int>() << "\n";
-
-    // 11. 字符串 -> 调用 void 函数
-    std::cout << "Invoke(\"Introduce\") -> ";
-    reg.Invoke("Person", "Introduce", p2, parser.Parse("[]"));
-
-    // 12. 继承类型：构造 Student（含基类字段），并调用继承来的函数
-    auto s = reg.Create("Student", parser.Parse(R"({"name":"Dave","age":20,"gender":true,"school":"PKU"})"));
-    std::cout << "Student: " << s.Cast<Student>().name
-        << " @ " << s.Cast<Student>().school
-        << ", age=" << reg.Invoke("Student", "GetAge", s, parser.Parse("[]")).Cast<int>()
-        << "\n";
-
-    // 13. 错误处理：未知类型 / 未知函数
-    try { reg.Create("NoSuchType"); }
-    catch (const std::exception &e) { std::cout << "caught: " << e.what() << "\n"; }
-    try { reg.Invoke("Person", "NoSuchFn", p2, parser.Parse("[]")); }
-    catch (const std::exception &e) { std::cout << "caught: " << e.what() << "\n"; }
+    // 5) 错误处理
+    std::cout << "  错误处理:\n";
+    try { (void)reg.create("NoSuchType"); }
+    catch (const std::exception &e) { std::cout << "    " << e.what() << "\n"; }
+    try { (void)reg.get("Character", "noSuchMember", obj); }
+    catch (const std::exception &e) { std::cout << "    " << e.what() << "\n"; }
 
     return 0;
 }
