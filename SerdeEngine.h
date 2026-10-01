@@ -2,7 +2,7 @@
 // SerdeEngine.h — 序列化后端引擎
 //
 // SerdeEngine 是“SerdeADT <-> 文本”的抽象后端，与反射、业务类型完全解耦。
-// 具体格式（Json / Toml）各自实现一个引擎；SerdeServer 通过 engineFor() 按后端类型分派。
+// 具体格式（Json / Toml）各自实现一个引擎；SerdeServer 通过 getEngineFor() 按后端类型分派。
 //
 
 #ifndef REFLECT_SERDEENGINE_H
@@ -11,6 +11,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <iomanip>
@@ -42,9 +43,9 @@ enum class ESerdeBackend
     Binary, // 直接将 SerdeADT 转化为二进制文件
 };
 
-inline std::string_view backendExtension(ESerdeBackend backend)
+inline std::string_view backendExtension(ESerdeBackend Backend)
 {
-    switch (backend)
+    switch (Backend)
     {
         case ESerdeBackend::Json:   return "json";
         case ESerdeBackend::Toml:   return "toml";
@@ -60,88 +61,240 @@ inline constexpr std::string_view kBase64Chars =
 inline std::string base64Encode(std::string_view bytes)
 {
     const auto *p = reinterpret_cast<const std::uint8_t *>(bytes.data());
-    const std::size_t n = bytes.size();
-    std::string out;
-    out.reserve((n + 2) / 3 * 4);
-    std::size_t i = 0;
-    for (; i + 3 <= n; i += 3)
+    const std::size_t N = bytes.size();
+    std::string Out;
+    Out.reserve((N + 2) / 3 * 4);
+    std::size_t I = 0;
+    for (; I + 3 <= N; I += 3)
     {
-        std::uint32_t v = (static_cast<std::uint32_t>(p[i]) << 16) |
-                          (static_cast<std::uint32_t>(p[i + 1]) << 8) |
-                          static_cast<std::uint32_t>(p[i + 2]);
-        out.push_back(kBase64Chars[(v >> 18) & 0x3F]);
-        out.push_back(kBase64Chars[(v >> 12) & 0x3F]);
-        out.push_back(kBase64Chars[(v >> 6) & 0x3F]);
-        out.push_back(kBase64Chars[v & 0x3F]);
+        std::uint32_t V = (static_cast<std::uint32_t>(p[I]) << 16) |
+                          (static_cast<std::uint32_t>(p[I + 1]) << 8) |
+                          static_cast<std::uint32_t>(p[I + 2]);
+        Out.push_back(kBase64Chars[(V >> 18) & 0x3F]);
+        Out.push_back(kBase64Chars[(V >> 12) & 0x3F]);
+        Out.push_back(kBase64Chars[(V >> 6) & 0x3F]);
+        Out.push_back(kBase64Chars[V & 0x3F]);
     }
-    const std::size_t rem = n - i;
+    const std::size_t rem = N - I;
     if (rem == 1)
     {
-        std::uint32_t v = static_cast<std::uint32_t>(p[i]) << 16;
-        out.push_back(kBase64Chars[(v >> 18) & 0x3F]);
-        out.push_back(kBase64Chars[(v >> 12) & 0x3F]);
-        out.push_back('=');
-        out.push_back('=');
+        std::uint32_t V = static_cast<std::uint32_t>(p[I]) << 16;
+        Out.push_back(kBase64Chars[(V >> 18) & 0x3F]);
+        Out.push_back(kBase64Chars[(V >> 12) & 0x3F]);
+        Out.push_back('=');
+        Out.push_back('=');
     }
     else if (rem == 2)
     {
-        std::uint32_t v = (static_cast<std::uint32_t>(p[i]) << 16) |
-                          (static_cast<std::uint32_t>(p[i + 1]) << 8);
-        out.push_back(kBase64Chars[(v >> 18) & 0x3F]);
-        out.push_back(kBase64Chars[(v >> 12) & 0x3F]);
-        out.push_back(kBase64Chars[(v >> 6) & 0x3F]);
-        out.push_back('=');
+        std::uint32_t V = (static_cast<std::uint32_t>(p[I]) << 16) |
+                          (static_cast<std::uint32_t>(p[I + 1]) << 8);
+        Out.push_back(kBase64Chars[(V >> 18) & 0x3F]);
+        Out.push_back(kBase64Chars[(V >> 12) & 0x3F]);
+        Out.push_back(kBase64Chars[(V >> 6) & 0x3F]);
+        Out.push_back('=');
     }
-    return out;
+    return Out;
 }
 
 inline std::optional<SerdeBinary> base64Decode(std::string_view in)
 {
     static std::int8_t table[256] = {};
     static bool init = [] {
-        for (int i = 0; i < 256; ++i) table[i] = -1;
-        for (int i = 0; i < 64; ++i) table[static_cast<unsigned char>(kBase64Chars[i])] = static_cast<std::int8_t>(i);
+        for (int I = 0; I < 256; ++I) table[I] = -1;
+        for (int I = 0; I < 64; ++I) table[static_cast<unsigned char>(kBase64Chars[I])] = static_cast<std::int8_t>(I);
         return true;
     }();
     (void)init;
 
-    SerdeBinary out;
-    out.reserve(in.size() / 4 * 3 + 3);
-    std::uint32_t acc = 0;
-    int bits = 0;
-    for (char c : in)
+    SerdeBinary Out;
+    Out.reserve(in.size() / 4 * 3 + 3);
+    std::uint32_t Acc = 0;
+    int Bits = 0;
+    for (char Ch : in)
     {
-        if (c == '=' || c == '\n' || c == '\r') continue;
-        auto v = table[static_cast<unsigned char>(c)];
-        if (v < 0) return std::nullopt;
-        acc = (acc << 6) | static_cast<std::uint32_t>(v);
-        bits += 6;
-        if (bits >= 8)
+        if (Ch == '=' || Ch == '\n' || Ch == '\r') continue;
+        auto V = table[static_cast<unsigned char>(Ch)];
+        if (V < 0) return std::nullopt;
+        Acc = (Acc << 6) | static_cast<std::uint32_t>(V);
+        Bits += 6;
+        if (Bits >= 8)
         {
-            bits -= 8;
-            out.push_back(static_cast<std::byte>((acc >> bits) & 0xFF));
+            Bits -= 8;
+            Out.push_back(static_cast<std::byte>((Acc >> Bits) & 0xFF));
         }
     }
-    return out;
+    return Out;
 }
 
-inline std::string toIso8601(std::chrono::system_clock::time_point tp)
+// ---- 纯标准 C++ 的 UTC 历法换算 ----
+// 不使用 gmtime_r / gmtime_s / timegm / _mkgmtime：前两者与后两者分别属于 POSIX 与 MSVC
+// 两套互不兼容的扩展（参数顺序亦不同），且 timegm 在严格 ANSI 模式（-std=c++NN）下于部分
+// libc 中不可见。这里改用整数历法运算（Howard Hinnant 算法）自行换算 UTC 日历字段，
+// 不依赖平台 API、本地时区、区域设置与全局状态，Windows / macOS / Linux 结果完全一致，且线程安全。
+namespace detail
 {
-    std::time_t t = std::chrono::system_clock::to_time_t(tp);
-    std::tm tm{};
-    gmtime_r(&t, &tm);
-    char buf[32];
-    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-    return buf;
+// 公历日期 -> 自 1970-01-01 (UTC) 起的天数，支持 1970 之前的负天数
+[[nodiscard]] constexpr std::int64_t getDaysFromCivil(int Y, unsigned M, unsigned D) noexcept
+{
+    Y -= static_cast<int>(M <= 2u);
+    const std::int64_t Era = (Y >= 0 ? Y : Y - 399) / 400;
+    const unsigned     Yoe = static_cast<unsigned>(Y - Era * 400);        // [0, 399]
+    const unsigned     Mp  = (M > 2u ? M - 3u : M + 9u);                  // 3 月记为 0
+    const unsigned     Doy = (153u * Mp + 2u) / 5u + (D - 1u);            // [0, 365]
+    const unsigned     Doe = Yoe * 365u + Yoe / 4u - Yoe / 100u + Doy;    // [0, 146096]
+    return Era * 146097 + static_cast<std::int64_t>(Doe) - 719468;
+}
+
+// 自 1970-01-01 (UTC) 起的天数 -> 公历日期
+constexpr void getCivilFromDays(std::int64_t Z, int &Y, unsigned &M, unsigned &D) noexcept
+{
+    Z += 719468;
+    const int64_t  Era = (Z >= 0 ? Z : Z - 146096) / 146097;
+    const unsigned Doe = static_cast<unsigned>(Z - Era * 146097);                 // [0, 146096]
+    const unsigned Yoe = (Doe - Doe / 1460u + Doe / 36524u - Doe / 146096u) / 365u; // [0, 399]
+    const unsigned Doy = Doe - (365u * Yoe + Yoe / 4u - Yoe / 100u);              // [0, 365]
+    const unsigned Mp  = (5u * Doy + 2u) / 153u;                                  // [0, 11]
+    M = (Mp < 10u ? Mp + 3u : Mp - 9u);                                               // [1, 12]
+    D = Doy - (153u * Mp + 2u) / 5u + 1u;                                             // [1, 31]
+    Y = static_cast<int>(static_cast<std::int64_t>(Yoe) + Era * 400 + (M <= 2u ? 1 : 0));
+}
+} // namespace detail
+
+inline std::string toIso8601(std::chrono::system_clock::time_point Tp)
+{
+    // 向负无穷取整到秒 / 天：1970 之前的时间点同样正确（不依赖 to_time_t 的舍入方向）
+    const auto Epoch = std::chrono::floor<std::chrono::seconds>(Tp.time_since_epoch());
+    const auto Days  = std::chrono::floor<std::chrono::days>(Epoch);
+    const auto Tod   = Epoch - Days; // [0s, 86400s)
+
+    int      Y = 0;
+    unsigned M = 0;
+    unsigned D = 0;
+    detail::getCivilFromDays(Days.count(), Y, M, D);
+
+    const auto Hour = std::chrono::duration_cast<std::chrono::hours>(Tod).count();
+    const auto Min  = std::chrono::duration_cast<std::chrono::minutes>(Tod).count() % 60;
+    const auto Sec  = std::chrono::duration_cast<std::chrono::seconds>(Tod).count() % 60;
+
+    char Buf[40];
+    std::snprintf(Buf, sizeof(Buf), "%04d-%02u-%02uT%02lld:%02lld:%02lldZ",
+                  Y, M, D,
+                  static_cast<long long>(Hour),
+                  static_cast<long long>(Min),
+                  static_cast<long long>(Sec));
+    return Buf;
 }
 
 inline std::optional<std::chrono::system_clock::time_point> fromIso8601(std::string_view s)
 {
-    std::tm tm{};
-    std::istringstream iss{ std::string(s) };
-    iss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
-    if (iss.fail()) return std::nullopt;
-    return std::chrono::system_clock::from_time_t(timegm(&tm));
+    // 解析 toIso8601 的规范形式 "YYYY-MM-DDTHH:MM:SSZ"（结尾 Z 可省略），
+    // 避免 std::get_time 对区域设置与流状态的依赖（其行为在不同标准库间并不一致）
+    const auto ReadDigits = [s](std::size_t Pos, std::size_t Count, int &Out) -> bool
+    {
+        if (Pos + Count > s.size())
+        {
+            return false;
+        }
+        int V = 0;
+        for (std::size_t I = 0; I < Count; ++I)
+        {
+            const char C = s[Pos + I];
+            if (C < '0' || C > '9')
+            {
+                return false;
+            }
+            V = V * 10 + (C - '0');
+        }
+        Out = V;
+        return true;
+    };
+
+    if (s.size() < 19)
+    {
+        return std::nullopt;
+    }
+    if (s[4] != '-' || s[7] != '-' || s[13] != ':' || s[16] != ':')
+    {
+        return std::nullopt;
+    }
+    if (s[10] != 'T' && s[10] != 't' && s[10] != ' ')
+    {
+        return std::nullopt;
+    }
+    if (const std::string_view Tail = s.substr(19); !Tail.empty() && Tail != "Z" && Tail != "z")
+    {
+        return std::nullopt;
+    }
+
+    int Y = 0, Mo = 0, D = 0, H = 0, Mi = 0, Se = 0;
+    if (!ReadDigits(0, 4, Y) || !ReadDigits(5, 2, Mo) || !ReadDigits(8, 2, D) ||
+        !ReadDigits(11, 2, H) || !ReadDigits(14, 2, Mi) || !ReadDigits(17, 2, Se))
+    {
+        return std::nullopt;
+    }
+    if (Mo < 1 || Mo > 12 || D < 1 || D > 31 || H > 23 || Mi > 59 || Se > 59)
+    {
+        return std::nullopt;
+    }
+
+    const std::int64_t Days =
+        detail::getDaysFromCivil(Y, static_cast<unsigned>(Mo), static_cast<unsigned>(D));
+    // 回代校验：拒绝 2 月 30 日这类历法上不存在的日期
+    int      Ye = 0;
+    unsigned Me = 0;
+    unsigned De = 0;
+    detail::getCivilFromDays(Days, Ye, Me, De);
+    if (Ye != Y || Me != static_cast<unsigned>(Mo) || De != static_cast<unsigned>(D))
+        return std::nullopt;
+
+    const std::int64_t Secs = Days * 86400 + H * 3600 + Mi * 60 + Se;
+    return std::chrono::system_clock::time_point{
+        std::chrono::duration_cast<std::chrono::system_clock::duration>(
+            std::chrono::seconds{ Secs })
+    };
+}
+
+// ========================= 文本预处理（读取前先规整） =========================
+// 序列化写出的是带 \n / \t 的文本；读取时先做一次规整，避免下列情况影响解析：
+//   1) 文件带 UTF-8 BOM（Windows 编辑器常见）
+//   2) CRLF / 单独的 CR（Windows 记事本换行）
+//   3) 首尾多余空白（末尾换行、行尾空格）
+inline bool isTextSpace(char C) noexcept
+{
+    return C == ' ' || C == '\t' || C == '\n' || C == '\r' || C == '\f' || C == '\v';
+}
+
+inline std::string getNormalizeText(std::string_view Text)
+{
+    constexpr std::string_view Bom = "\xEF\xBB\xBF"; // UTF-8 BOM
+    if (Text.starts_with(Bom))
+    {
+        Text.remove_prefix(Bom.size());
+    }
+
+    std::string Out;
+    Out.reserve(Text.size());
+    for (const char C : Text)
+    {
+        if (C != '\r') // CRLF / CR -> LF
+        {
+            Out.push_back(C);
+        }
+    }
+
+    std::size_t Beg = 0;
+    std::size_t End = Out.size();
+    while (Beg < End && isTextSpace(Out[Beg]))
+    {
+        ++Beg;
+    }
+    while (End > Beg && isTextSpace(Out[End - 1]))
+    {
+        --End;
+    }
+    Out.resize(End);
+    Out.erase(0, Beg);
+    return Out;
 }
 
 // ========================= 抽象后端 =========================
@@ -149,8 +302,8 @@ class SerdeEngine
 {
 public:
     virtual ~SerdeEngine() = default;
-    virtual SerdeADT parse(std::string_view text) const = 0;
-    virtual std::string serialize(const SerdeADT &adt) const = 0;
+    virtual SerdeADT parse(std::string_view Text) const = 0;
+    virtual std::string serialize(const SerdeADT &Adt) const = 0;
 };
 
 // ========================= JSON 后端 =========================
@@ -159,92 +312,100 @@ class SerdeJsonEngine : public SerdeEngine
     using Json = nlohmann::ordered_json;
 
 public:
-    SerdeADT parse(std::string_view text) const override
+    SerdeADT parse(std::string_view Text) const override
     {
+        // 先处理 \n \t 这类空白字符（含 BOM / CRLF），再交给 JSON 解析器
+        const std::string Clean = getNormalizeText(Text);
+        if (Clean.empty())
+        {
+            throw std::runtime_error("JSON parse error: empty input");
+        }
+
         try
         {
-            return fromJson(Json::parse(text));
+            return fromJson(Json::parse(Clean));
         }
-        catch (const std::exception &e)
+        catch (const std::exception &E)
         {
-            throw std::runtime_error(std::string("JSON parse error: ") + e.what());
+            throw std::runtime_error(std::string("JSON parse error: ") + E.what());
         }
     }
 
-    std::string serialize(const SerdeADT &adt) const override
+    std::string serialize(const SerdeADT &Adt) const override
     {
-        return toJson(adt).dump();
+        // 落盘为可读文本：每个层级用 \t 缩进、每行以 \n 结尾，末尾补一个 \n
+        return toJson(Adt).dump(1, '\t') + "\n";
     }
 
 private:
-    static Json toJson(const SerdeADT &v)
+    static Json toJson(const SerdeADT &V)
     {
-        if (v.isNull())   return Json(nullptr);
-        if (v.isBool())   return Json(v.asBool());
-        if (v.isInt())    return Json(v.asInt());
-        if (v.isUint())   return Json(v.asUint());
-        if (v.isDouble()) return Json(v.asDouble());
-        if (v.isString()) return Json(v.asString());
-        if (v.isBinary())
+        if (V.isNull())   return Json(nullptr);
+        if (V.isBool())   return Json(V.asBool());
+        if (V.isInt())    return Json(V.asInt());
+        if (V.isUint())   return Json(V.asUint());
+        if (V.isDouble()) return Json(V.asDouble());
+        if (V.isString()) return Json(V.asString());
+        if (V.isBinary())
         {
-            Json o = Json::object();
-            o["$binary"] = base64Encode({ reinterpret_cast<const char *>(v.asBinary().data()),
-                                          v.asBinary().size() });
-            return o;
+            Json O = Json::object();
+            O["$binary"] = base64Encode({ reinterpret_cast<const char *>(V.asBinary().data()),
+                                          V.asBinary().size() });
+            return O;
         }
-        if (v.isDatetime())
+        if (V.isDatetime())
         {
-            Json o = Json::object();
-            o["$datetime"] = toIso8601(v.asDatetime());
-            return o;
+            Json O = Json::object();
+            O["$datetime"] = toIso8601(V.asDatetime());
+            return O;
         }
-        if (v.isArray())
+        if (V.isArray())
         {
-            Json a = Json::array();
-            for (const auto &e : v.asArray()) a.push_back(toJson(e));
-            return a;
+            Json A = Json::array();
+            for (const auto &E : V.asArray()) A.push_back(toJson(E));
+            return A;
         }
-        if (v.isObject())
+        if (V.isObject())
         {
-            Json o = Json::object();
-            for (const auto &[k, e] : v.asObject()) o[k] = toJson(e);
-            return o;
+            Json O = Json::object();
+            for (const auto &[K, E] : V.asObject()) O[K] = toJson(E);
+            return O;
         }
         throw std::runtime_error("toJson: unsupported value");
     }
 
-    static SerdeADT fromJson(const Json &j)
+    static SerdeADT fromJson(const Json &J)
     {
-        if (j.is_null())              return SerdeADT{ nullptr };
-        if (j.is_boolean())           return SerdeADT{ j.get<bool>() };
-        if (j.is_number_integer())    return SerdeADT{ j.get<std::int64_t>() };
-        if (j.is_number_unsigned())   return SerdeADT{ j.get<std::uint64_t>() };
-        if (j.is_number_float())      return SerdeADT{ j.get<double>() };
-        if (j.is_string())            return SerdeADT{ j.get<std::string>() };
-        if (j.is_array())
+        if (J.is_null())              return SerdeADT{ nullptr };
+        if (J.is_boolean())           return SerdeADT{ J.get<bool>() };
+        if (J.is_number_integer())    return SerdeADT{ J.get<std::int64_t>() };
+        if (J.is_number_unsigned())   return SerdeADT{ J.get<std::uint64_t>() };
+        if (J.is_number_float())      return SerdeADT{ J.get<double>() };
+        if (J.is_string())            return SerdeADT{ J.get<std::string>() };
+        if (J.is_array())
         {
-            SerdeArray a;
-            for (const auto &e : j) a.push_back(fromJson(e));
-            return SerdeADT{ std::move(a) };
+            SerdeArray A;
+            for (const auto &E : J) A.push_back(fromJson(E));
+            return SerdeADT{ std::move(A) };
         }
-        if (j.is_object())
+        if (J.is_object())
         {
-            if (j.size() == 1)
+            if (J.size() == 1)
             {
-                if (auto it = j.find("$binary"); it != j.end() && it->is_string())
+                if (auto It = J.find("$binary"); It != J.end() && It->is_string())
                 {
-                    if (auto dec = base64Decode(it->get<std::string>()))
-                        return SerdeADT{ std::move(*dec) };
+                    if (auto Dec = base64Decode(It->get<std::string>()))
+                        return SerdeADT{ std::move(*Dec) };
                 }
-                if (auto it = j.find("$datetime"); it != j.end() && it->is_string())
+                if (auto It = J.find("$datetime"); It != J.end() && It->is_string())
                 {
-                    if (auto tp = fromIso8601(it->get<std::string>()))
-                        return SerdeADT{ *tp };
+                    if (auto Tp = fromIso8601(It->get<std::string>()))
+                        return SerdeADT{ *Tp };
                 }
             }
-            SerdeObject o;
-            for (const auto &[k, e] : j.items()) o.emplace_back(k, fromJson(e));
-            return SerdeADT{ std::move(o) };
+            SerdeObject O;
+            for (const auto &[K, E] : J.items()) O.emplace_back(K, fromJson(E));
+            return SerdeADT{ std::move(O) };
         }
         throw std::runtime_error("fromJson: unsupported json value");
     }
@@ -254,70 +415,77 @@ private:
 class SerdeTomlEngine : public SerdeEngine
 {
 public:
-    SerdeADT parse(std::string_view text) const override
+    SerdeADT parse(std::string_view Text) const override
     {
         try
         {
-            toml::table tbl = toml::parse(text); // TOML_EXCEPTIONS=1 时 parse 直接返回 table，失败抛异常
-            return fromTomlTable(tbl);
+            // 同样先规整 \n \t / BOM / CRLF 再交给解析器
+            toml::table Tbl = toml::parse(getNormalizeText(Text)); // TOML_EXCEPTIONS=1 时 parse 直接返回 table，失败抛异常
+            return fromTomlTable(Tbl);
         }
-        catch (const std::exception &e)
+        catch (const std::exception &E)
         {
-            throw std::runtime_error(std::string("TOML parse error: ") + e.what());
+            throw std::runtime_error(std::string("TOML parse error: ") + E.what());
         }
     }
 
-    std::string serialize(const SerdeADT &adt) const override
+    std::string serialize(const SerdeADT &Adt) const override
     {
-        if (!adt.isObject()) throw std::runtime_error("TOML root must be a table");
-        toml::table tbl = toTomlTable(adt.asObject());
-        std::ostringstream oss;
-        oss << tbl;
-        return oss.str();
+        if (!Adt.isObject()) throw std::runtime_error("TOML root must be A table");
+        toml::table Tbl = toTomlTable(Adt.asObject());
+        std::ostringstream Oss;
+        Oss << Tbl;
+
+        std::string Text = Oss.str();
+        if (Text.empty() || Text.back() != '\n') // 文件末尾统一补一个换行
+        {
+            Text.push_back('\n');
+        }
+        return Text;
     }
 
 private:
-    static void insertToml(toml::table &tbl, const std::string &key, const SerdeADT &v)
+    static void insertToml(toml::table &Tbl, const std::string &Key, const SerdeADT &V)
     {
-        if (v.isString())      { tbl.insert_or_assign(key, v.asString()); }
-        else if (v.isInt())    { tbl.insert_or_assign(key, v.asInt()); }
-        else if (v.isUint())   { tbl.insert_or_assign(key, static_cast<std::int64_t>(v.asUint())); }
-        else if (v.isDouble()) { tbl.insert_or_assign(key, v.asDouble()); }
-        else if (v.isBool())   { tbl.insert_or_assign(key, v.asBool()); }
-        else if (v.isArray())
+        if (V.isString())      { Tbl.insert_or_assign(Key, V.asString()); }
+        else if (V.isInt())    { Tbl.insert_or_assign(Key, V.asInt()); }
+        else if (V.isUint())   { Tbl.insert_or_assign(Key, static_cast<std::int64_t>(V.asUint())); }
+        else if (V.isDouble()) { Tbl.insert_or_assign(Key, V.asDouble()); }
+        else if (V.isBool())   { Tbl.insert_or_assign(Key, V.asBool()); }
+        else if (V.isArray())
         {
-            toml::array arr;
-            for (const auto &e : v.asArray())
+            toml::array Arr;
+            for (const auto &E : V.asArray())
             {
-                if (e.isObject())
+                if (E.isObject())
                 {
-                    toml::table sub;
-                    for (const auto &[k2, e2] : e.asObject()) insertToml(sub, k2, e2);
-                    arr.push_back(std::move(sub));
+                    toml::table Sub;
+                    for (const auto &[K2, E2] : E.asObject()) insertToml(Sub, K2, E2);
+                    Arr.push_back(std::move(Sub));
                 }
-                else if (e.isString())      arr.push_back(e.asString());
-                else if (e.isInt())         arr.push_back(e.asInt());
-                else if (e.isUint())        arr.push_back(static_cast<std::int64_t>(e.asUint()));
-                else if (e.isDouble())      arr.push_back(e.asDouble());
-                else if (e.isBool())        arr.push_back(e.asBool());
+                else if (E.isString())      Arr.push_back(E.asString());
+                else if (E.isInt())         Arr.push_back(E.asInt());
+                else if (E.isUint())        Arr.push_back(static_cast<std::int64_t>(E.asUint()));
+                else if (E.isDouble())      Arr.push_back(E.asDouble());
+                else if (E.isBool())        Arr.push_back(E.asBool());
                 // null / binary / datetime：TOML 无原生支持，跳过
             }
-            tbl.insert_or_assign(key, std::move(arr));
+            Tbl.insert_or_assign(Key, std::move(Arr));
         }
-        else if (v.isObject())
+        else if (V.isObject())
         {
-            toml::table sub;
-            for (const auto &[k2, e2] : v.asObject()) insertToml(sub, k2, e2);
-            tbl.insert_or_assign(key, std::move(sub));
+            toml::table Sub;
+            for (const auto &[K2, E2] : V.asObject()) insertToml(Sub, K2, E2);
+            Tbl.insert_or_assign(Key, std::move(Sub));
         }
         // null / binary / datetime：跳过
     }
 
-    static toml::table toTomlTable(const SerdeObject &obj)
+    static toml::table toTomlTable(const SerdeObject &Obj)
     {
-        toml::table tbl;
-        for (const auto &[k, v] : obj) insertToml(tbl, k, v);
-        return tbl;
+        toml::table Tbl;
+        for (const auto &[K, V] : Obj) insertToml(Tbl, K, V);
+        return Tbl;
     }
 
     static SerdeADT fromTomlNode(const toml::node &node)
@@ -328,42 +496,51 @@ private:
         if (node.is_boolean())        return SerdeADT{ node.value<bool>().value_or(false) };
         if (node.is_array())
         {
-            SerdeArray arr;
-            for (const auto &e : *node.as_array()) arr.push_back(fromTomlNode(e));
-            return SerdeADT{ std::move(arr) };
+            SerdeArray Arr;
+            for (const auto &E : *node.as_array())
+            {
+                Arr.push_back(fromTomlNode(E));
+            }
+            return SerdeADT{ std::move(Arr) };
         }
         if (node.is_table())
         {
-            SerdeObject obj;
-            for (const auto &[k, v] : *node.as_table()) obj.emplace_back(k, fromTomlNode(v));
-            return SerdeADT{ std::move(obj) };
+            SerdeObject Obj;
+            for (const auto &[K, V] : *node.as_table())
+            {
+                Obj.emplace_back(K, fromTomlNode(V));
+            }
+            return SerdeADT{ std::move(Obj) };
         }
         if (node.is_date_time())
         {
-            std::ostringstream oss;
-            oss << *node.as_date_time();
-            return SerdeADT{ oss.str() };
+            std::ostringstream Oss;
+            Oss << *node.as_date_time();
+            return SerdeADT{ Oss.str() };
         }
         return SerdeADT{ nullptr };
     }
 
-    static SerdeADT fromTomlTable(const toml::table &tbl)
+    static SerdeADT fromTomlTable(const toml::table &Tbl)
     {
-        SerdeObject obj;
-        for (const auto &[k, v] : tbl) obj.emplace_back(k, fromTomlNode(v));
-        return SerdeADT{ std::move(obj) };
+        SerdeObject Obj;
+        for (const auto &[K, V] : Tbl)
+        {
+            Obj.emplace_back(K, fromTomlNode(V));
+        }
+        return SerdeADT{ std::move(Obj) };
     }
 };
 
 // ========================= 后端工厂 =========================
-inline SerdeEngine *engineFor(ESerdeBackend backend)
+inline SerdeEngine *getEngineFor(ESerdeBackend Backend)
 {
-    static SerdeJsonEngine jsonEngine;
-    static SerdeTomlEngine tomlEngine;
-    switch (backend)
+    static SerdeJsonEngine JsonEngine;
+    static SerdeTomlEngine TomlEngine;
+    switch (Backend)
     {
-        case ESerdeBackend::Json: return &jsonEngine;
-        case ESerdeBackend::Toml: return &tomlEngine;
+        case ESerdeBackend::Json: return &JsonEngine;
+        case ESerdeBackend::Toml: return &TomlEngine;
         default:                  return nullptr;
     }
 }

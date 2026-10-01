@@ -33,11 +33,11 @@ using SerdeBinary = std::vector<std::byte>;
 // 格式特定 / 值级覆盖信息
 struct SerdeMetadata
 {
-    std::optional<std::string> tag;             // 类型标签（YAML/CBOR）
-    std::vector<std::string>   comments;        // 注释
-    std::optional<std::string> stringEncoding;  // 本值字符串编码
-    std::optional<std::string> endianness;      // 本值字节序
-    std::optional<std::string> timezone;        // 本值时区
+    std::optional<std::string> Tag;             // 类型标签（YAML/CBOR）
+    std::vector<std::string>   Comments;        // 注释
+    std::optional<std::string> StringEncoding;  // 本值字符串编码
+    std::optional<std::string> Endianness;      // 本值字节序
+    std::optional<std::string> Timezone;        // 本值时区
 };
 
 class SerdeADT
@@ -57,40 +57,40 @@ public:
 
 private:
     Variant Data;
-    std::unique_ptr<SerdeMetadata> Metadata_;
+    std::unique_ptr<SerdeMetadata> Metadata;
 
 public:
     SerdeADT() : Data(std::monostate{}) {}
     SerdeADT(std::nullptr_t) : Data(std::monostate{}) {}
-    SerdeADT(bool b) : Data(b) {}
+    SerdeADT(bool B) : Data(B) {}
     SerdeADT(double d) : Data(d) {}
     SerdeADT(float f) : Data(static_cast<double>(f)) {}
 
     // 所有整型统一收敛为 int64/uint64，避免 int -> {int64,uint64,double,bool} 二义性
     template<typename T>
         requires (std::integral<T> && !std::same_as<T, bool>)
-    SerdeADT(T v)
+    SerdeADT(T V)
     {
-        if constexpr (std::is_signed_v<T>) Data = static_cast<std::int64_t>(v);
-        else Data = static_cast<std::uint64_t>(v);
+        if constexpr (std::is_signed_v<T>) Data = static_cast<std::int64_t>(V);
+        else Data = static_cast<std::uint64_t>(V);
     }
 
-    SerdeADT(std::string s) : Data(std::move(s)) {}
-    SerdeADT(const char *s) : Data(std::string(s)) {}
-    SerdeADT(SerdeBinary b) : Data(std::move(b)) {}
-    SerdeADT(std::chrono::system_clock::time_point tp) : Data(tp) {}
-    SerdeADT(SerdeArray arr) : Data(std::make_unique<SerdeArray>(std::move(arr))) {}
-    SerdeADT(SerdeObject obj) : Data(std::make_unique<SerdeObject>(std::move(obj))) {}
+    SerdeADT(std::string S) : Data(std::move(S)) {}
+    SerdeADT(const char *S) : Data(std::string(S)) {}
+    SerdeADT(SerdeBinary B) : Data(std::move(B)) {}
+    SerdeADT(std::chrono::system_clock::time_point Tb) : Data(Tb) {}
+    SerdeADT(SerdeArray Arr) : Data(std::make_unique<SerdeArray>(std::move(Arr))) {}
+    SerdeADT(SerdeObject Obj) : Data(std::make_unique<SerdeObject>(std::move(Obj))) {}
 
-    SerdeADT(const SerdeADT &other)
-        : Data(copyVariant(other.Data)),
-          Metadata_(other.Metadata_ ? std::make_unique<SerdeMetadata>(*other.Metadata_) : nullptr) {}
-    SerdeADT &operator=(const SerdeADT &other)
+    SerdeADT(const SerdeADT &Other)
+        : Data(copyVariant(Other.Data)),
+          Metadata(Other.Metadata ? std::make_unique<SerdeMetadata>(*Other.Metadata) : nullptr) {}
+    SerdeADT &operator=(const SerdeADT &Other)
     {
-        if (this != &other)
+        if (this != &Other)
         {
-            Data = copyVariant(other.Data);
-            Metadata_ = other.Metadata_ ? std::make_unique<SerdeMetadata>(*other.Metadata_) : nullptr;
+            Data = copyVariant(Other.Data);
+            Metadata = Other.Metadata ? std::make_unique<SerdeMetadata>(*Other.Metadata) : nullptr;
         }
         return *this;
     }
@@ -128,46 +128,53 @@ public:
     SerdeObject &asObject() { return *std::get<std::unique_ptr<SerdeObject>>(Data); }
 
     // ---------- 便捷访问 ----------
-    [[nodiscard]] const SerdeADT *find(std::string_view key) const
+    [[nodiscard]] const SerdeADT *find(std::string_view Key) const
     {
         if (!isObject()) return nullptr;
-        for (const auto &[k, v] : asObject())
-            if (k == key) return &v;
+        for (const auto &[K, V] : asObject())
+            if (K == Key) return &V;
         return nullptr;
     }
-    SerdeADT *find(std::string_view key)
+    SerdeADT *find(std::string_view Key)
     {
         if (!isObject()) return nullptr;
-        for (auto &[k, v] : asObject())
-            if (k == key) return &v;
+        for (auto &[K, V] : asObject())
+            if (K == Key) return &V;
         return nullptr;
     }
 
     // ---------- 元数据 ----------
     SerdeMetadata &metadata()
     {
-        if (!Metadata_) Metadata_ = std::make_unique<SerdeMetadata>();
-        return *Metadata_;
+        if (!Metadata) Metadata = std::make_unique<SerdeMetadata>();
+        return *Metadata;
     }
     [[nodiscard]] const SerdeMetadata &metadata() const
     {
-        static const SerdeMetadata empty{};
-        return Metadata_ ? *Metadata_ : empty;
+        static const SerdeMetadata Empty{};
+        return Metadata ? *Metadata : Empty;
     }
-    [[nodiscard]] bool hasMetadata() const { return Metadata_ != nullptr; }
+    [[nodiscard]] bool hasMetadata() const { return Metadata != nullptr; }
 
 private:
-    static Variant copyVariant(const Variant &v)
+    static Variant copyVariant(const Variant &V)
     {
-        return std::visit([](const auto &arg) -> Variant {
-            using T = std::decay_t<decltype(arg)>;
+        return std::visit([](const auto &Arg) -> Variant 
+        {
+            using T = std::decay_t<decltype(Arg)>;
             if constexpr (std::is_same_v<T, std::unique_ptr<SerdeArray>>)
-                return arg ? std::make_unique<SerdeArray>(*arg) : nullptr;
+            {
+                return Arg ? std::make_unique<SerdeArray>(*Arg) : nullptr;
+            }
             else if constexpr (std::is_same_v<T, std::unique_ptr<SerdeObject>>)
-                return arg ? std::make_unique<SerdeObject>(*arg) : nullptr;
+            {
+                return Arg ? std::make_unique<SerdeObject>(*Arg) : nullptr;
+            }
             else
-                return arg;
-        }, v);
+            {
+                return Arg;
+            }
+        }, V);
     }
 };
 

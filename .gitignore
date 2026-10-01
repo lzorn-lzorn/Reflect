@@ -2,6 +2,9 @@ cmake-build-*
 build
 Build
 
+# demo 生成的工作区目录
+SerdeDemo
+
 .idea
 .vscode
 .DS_Store

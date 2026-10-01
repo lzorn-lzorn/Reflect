@@ -5,10 +5,14 @@
 #ifndef TAG_H
 #define TAG_H
 
+#include <algorithm>
+#include <cstddef>    // size_t / std::ptrdiff_t
+#include <cstdint>    // int32_t
+#include <functional> // std::hash
+#include <optional>
 #include <string>
 #include <vector>
-#include <algorithm>
-#include <optional>
+
 namespace core
 {
 
@@ -92,21 +96,18 @@ public:
     [[nodiscard]] std::string get() const noexcept
     {
         std::string Result;
-        size_t N = Tags.size();
-        for (size_t I = 0; I < N; ++I)
+        // 预分配：各段长度之和 + 分隔符数量（段数 - 1）
+        size_t Total = Tags.empty() ? 0 : Tags.size() - 1;
+        for (const auto &OneTag : Tags)
         {
-            N += Tags[I].size();
+            Total += OneTag.size();
         }
+        Result.reserve(Total);
 
-        Result.reserve(N);
-
-        for (const auto & Tag : Tags)
+        for (const auto &OneTag : Tags)
         {
-            Result.append(Tag).append(std::to_string(Delimiter));
-        }
-        if (Result.back() == Delimiter)
-        {
-            Result.pop_back();
+            if (!Result.empty()) Result.push_back(Delimiter);
+            Result.append(OneTag);
         }
 
         return Result;
@@ -117,7 +118,7 @@ public:
      * @usage this: "AAAA.BBBB.CCCC" other: "AAAA.BBBB.DDDD" 返回 1
      * @return 返回第一个根节点 Tag 的序号
      */
-    [[nodiscard]] std::optional<int32_t> getFirstSameRoot(const Tag& InTag) const noexcept
+    [[nodiscard]] std::optional<int32_t> getFirstSameRoot([[maybe_unused]] const Tag& InTag) const noexcept
     {
 
         return std::nullopt;

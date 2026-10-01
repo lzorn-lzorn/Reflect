@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "SerdeADT.h"
-#include "Reflect.h"
+#include "reflect.h"
 #include "SerdeEngine.h"
 #include "SerdeServer.h"
 
@@ -75,9 +75,9 @@ struct Character
 int main()
 {
     // ---- 编译期校验 ----
-    static_assert(core::ReflectTypeInfo<Character>::Name == "Character");
-    static_assert(std::tuple_size_v<decltype(core::ReflectTypeInfo<Character>::Variables)> == 7);
-    static_assert(std::tuple_size_v<decltype(core::ReflectTypeInfo<Character>::Functions)> == 4);
+    static_assert(core::TypeInfo<Character>::Name == "Character");
+    static_assert(std::tuple_size_v<decltype(core::TypeInfo<Character>::Variables)> == 7);
+    static_assert(std::tuple_size_v<decltype(core::TypeInfo<Character>::Functions)> == 4);
     static_assert(core::ReflectFunctionTraits<decltype(&Character::GetLevel)>::IsConst);
     static_assert(core::ReflectFunctionTraits<decltype(&Character::Rename)>::Arity == 1);
 
@@ -95,7 +95,9 @@ int main()
     // ============ 一、文件测试：对象 -> SerdeADT -> 文件 -> 对象 ============
     core::SerdeADT adt = core::toAdt(hero);
 
-    auto root = std::filesystem::temp_directory_path() / "serde_demo";
+    // 工作区根目录：放在当前工作目录下（而不是系统临时目录，macOS 上那是 /var/folders/… 看不见，
+    // 部分环境下还无权创建），这样生成的目录与文件可以直接查看
+    auto root = std::filesystem::current_path() / "SerdeDemo";
     auto &server = core::SerdeServer::self();
     server.setRoot(root);
     core::Tag key{ { "Saved", "Player", "Hero" } };
@@ -104,10 +106,11 @@ int main()
     auto rt = server.serialize(adt, key, core::ESerdeBackend::Toml, core::ESerdeMode::Overwrite);
 
     std::cout << "== 文件测试 ==\n"
+              << "  工作区: " << std::filesystem::absolute(root).string() << "\n"
               << "  JSON 写入: " << (rj ? "ok" : rj.error()) << "  "
-              << (root / "Saved/Player/Hero.json").string() << "\n"
+              << std::filesystem::absolute(root / "Saved/Player/Hero.json").string() << "\n"
               << "  TOML 写入: " << (rt ? "ok" : rt.error()) << "  "
-              << (root / "Saved/Player/Hero.toml").string() << "\n";
+              << std::filesystem::absolute(root / "Saved/Player/Hero.toml").string() << "\n";
 
     auto lj = server.deserialize(key, core::ESerdeBackend::Json);
     auto pj = lj ? core::fromAdt<Character>(*lj) : std::expected<Character, std::string>{ std::unexpect, lj.error() };
@@ -120,7 +123,26 @@ int main()
                                         : pj.error()) << "\n";
     std::cout << "  TOML 回环: " << (pt ? (pt->name + " lv" + std::to_string(pt->level) + " hp" + std::to_string(pt->baseStat.hp)
                                       + " skills=" + std::to_string(pt->skills.size()))
-                                        : pt.error()) << "\n\n";
+                                        : pt.error()) << "\n";
+
+    // 落盘文本：带 \t 缩进与 \n 换行（这里直接回显文件内容）
+    {
+        std::ifstream Ifs(root / "Saved/Player/Hero.json");
+        std::cout << "  Hero.json 内容（\\t 缩进 / \\n 换行）:\n";
+        std::string Line;
+        while (std::getline(Ifs, Line))
+        {
+            std::cout << "    " << Line << "\n";
+        }
+    }
+
+    // ============ SerdeSpace / SerdeUnit ⇄ 真实目录 / 真实文件 ============
+    auto space = server.space("Saved/Player");                                 // 构造即创建真实目录
+    auto manual = space.createUnit("Manual", core::ESerdeBackend::Json);       // 立即落地真实文件
+    std::cout << "  Space 目录: " << std::filesystem::absolute(space.dir()).string()
+              << "  存在=" << space.isExist() << "\n"
+              << "  Unit  文件: " << std::filesystem::absolute(manual.path()).string()
+              << "  存在=" << manual.isExist() << "\n\n";
 
     // ============ 二、反射测试：字符串构造 / 访问成员 / 调用方法 ============
     core::registerReflect<Character>();
@@ -164,6 +186,22 @@ int main()
     catch (const std::exception &e) { std::cout << "    " << e.what() << "\n"; }
     try { (void)reg.get("Character", "noSuchMember", obj); }
     catch (const std::exception &e) { std::cout << "    " << e.what() << "\n"; }
+
+    // ============ 三、工作区落盘结果（磁盘上真实存在的目录与文件） ============
+    std::cout << "\n== 工作区实际内容 ==\n  " << std::filesystem::absolute(root).string() << "\n";
+    if (std::filesystem::exists(root))
+    {
+        for (const auto &Entry : std::filesystem::recursive_directory_iterator(root))
+        {
+            const auto Rel = std::filesystem::relative(Entry.path(), root).generic_string();
+            if (Entry.is_directory()) std::cout << "  [dir ] " << Rel << "\n";
+            else                      std::cout << "  [file] " << Rel << "  (" << Entry.file_size() << " B)\n";
+        }
+    }
+    else
+    {
+        std::cout << "  (未生成)\n";
+    }
 
     return 0;
 }
