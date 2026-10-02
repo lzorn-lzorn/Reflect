@@ -72,6 +72,24 @@ struct Character
     REFLECT_FUNCTIONS(LevelUp, GetLevel, AddSkill, Rename);
 };
 
+// ========================= 继承示例（演示基类/子类信息的记录与运行时查询） =========================
+struct Entity
+{
+    REFLECT_CLASS(Entity, ReflectNullBase);
+    REFLECT_FIELDS(
+        (int, id)
+    );
+};
+
+struct Player : Entity
+{
+    REFLECT_CLASS(Player, Entity);
+    REFLECT_FIELDS(
+        (std::string, nickname),
+        (int,         level)
+    );
+};
+
 int main()
 {
     // ---- 编译期校验 ----
@@ -80,6 +98,11 @@ int main()
     static_assert(std::tuple_size_v<decltype(core::TypeInfo<Character>::Functions)> == 4);
     static_assert(core::ReflectFunctionTraits<decltype(&Character::GetLevel)>::IsConst);
     static_assert(core::ReflectFunctionTraits<decltype(&Character::Rename)>::Arity == 1);
+    // 继承信息（编译期即可见）
+    static_assert(core::TypeInfo<Player>::HasBase);
+    static_assert(core::TypeInfo<Player>::BaseName == "Entity");
+    static_assert(!core::TypeInfo<Character>::HasBase);
+    static_assert(core::TypeInfo<Character>::BaseName.empty());
 
     std::cout << std::boolalpha;
 
@@ -145,8 +168,8 @@ int main()
               << "  存在=" << manual.isExist() << "\n\n";
 
     // ============ 二、反射测试：字符串构造 / 访问成员 / 调用方法 ============
-    core::registerReflect<Character>();
-    core::registerReflect<Skill>();
+    // 不再需要手写 registerReflect<X>()：REFLECT_CLASS 展开出的 inline static 注册器
+    // 已在进入 main 之前自动完成所有反射类型的注册。
     auto &reg = core::ReflectRegistry::self();
 
     // 1) 字符串构造对象
@@ -187,7 +210,29 @@ int main()
     try { (void)reg.get("Character", "noSuchMember", obj); }
     catch (const std::exception &e) { std::cout << "    " << e.what() << "\n"; }
 
-    // ============ 三、工作区落盘结果（磁盘上真实存在的目录与文件） ============
+    // ============ 三、自动注册与继承信息查询 ============
+    std::cout << "\n== 自动注册与继承查询 ==\n"
+              << "  已自动注册类型数: " << reg.size() << "\n"
+              << "  类型清单:";
+    for (const auto &N : reg.typeNames()) std::cout << " " << N;
+    std::cout << "\n"
+              << "  直接基类: baseOf(Player) = " << reg.baseOf("Player").value_or("<none>") << "\n"
+              << "  基类链: baseChainOf(Player) = [";
+    for (const auto &B : reg.baseChainOf("Player")) std::cout << " " << B;
+    std::cout << " ]\n"
+              << "  直接子类: derivedOf(Entity) = [";
+    for (const auto &D : reg.derivedOf("Entity")) std::cout << " " << D;
+    std::cout << " ]\n"
+              << "  isDerivedFrom(Player, Entity)   = " << std::boolalpha << reg.isDerivedFrom("Player", "Entity") << "\n"
+              << "  isDerivedFrom(Character, Entity) = " << reg.isDerivedFrom("Character", "Entity") << "\n";
+
+    // 继承字段参与反射遍历：Player 的成员包含基类 Entity 的 id
+    const core::SerdeADT playerAdt = core::toAdt(Player{ { 7 }, "Bilbo", 3 });
+    std::cout << "  继承字段遍历: id=" << playerAdt.find("id")->asInt()
+              << ", nickname=" << playerAdt.find("nickname")->asString()
+              << ", level=" << playerAdt.find("level")->asInt() << "\n";
+
+    // ============ 四、工作区落盘结果（磁盘上真实存在的目录与文件） ============
     std::cout << "\n== 工作区实际内容 ==\n  " << std::filesystem::absolute(root).string() << "\n";
     if (std::filesystem::exists(root))
     {

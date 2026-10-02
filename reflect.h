@@ -193,10 +193,18 @@ struct TypeInfo
     static constexpr std::string_view Name = detail::NameOf<Ty>::Value;
     using Base = typename detail::BaseOf<Ty>::Type;
     static constexpr bool HasBase = !std::is_same_v<Base, ReflectNullBase>;
+    // 直接基类名：无基类时 Base == ReflectNullBase，其 Name 为空串，故这里天然得到空串
+    static constexpr std::string_view BaseName = TypeInfo<Base>::Name;
     static constexpr auto Functions = detail::FunctionsOf<Ty>::Value;
     static constexpr auto Variables = detail::VariablesOf<Ty>::Value;
 
     static constexpr const char *getClassName() { return Name.data(); }
+
+    // ---- 运行时查询：基类 / 子类信息（父/子关系由 ReflectRegistry 在注册时汇总） ----
+    static std::string_view baseName() noexcept { return BaseName; }  // 直接基类名（编译期即知）
+    static std::vector<std::string> derivedNames();                    // 直接子类名（定义见 ReflectRegistry 之后）
+    static std::vector<std::string> baseChain();                       // 基类全链（自近及远，不含自身）
+    static bool isDerivedFrom(std::string_view Base);                  // 是否（直接或间接）派生自 Base
 
     template<typename Callable>
     static void forEachMembers(Ty &Obj, Callable &&Fn)
@@ -541,10 +549,17 @@ public:
     void registerEntry(std::string_view Name, Factory factory,
                        std::unordered_map<std::string, Invoker> invokers,
                        std::unordered_map<std::string, Getter> Getters,
-                       std::unordered_map<std::string, Setter> Setters)
+                       std::unordered_map<std::string, Setter> Setters,
+                       std::string_view BaseName, bool HasBase)
     {
-        Types.emplace(std::string(Name),
+        const std::string Key{ Name };
+        Types.emplace(Key,
                        Entry{ std::move(factory), std::move(invokers), std::move(Getters), std::move(Setters) });
+        if (HasBase)
+        {
+            BaseOf[Key] = std::string(BaseName);              // 类型名 -> 直接基类名
+            DerivedOf[std::string(BaseName)].push_back(Key);  // 基类名 -> 直接子类名
+        }
     }
 
     [[nodiscard]] bool has(std::string_view Name) const
@@ -615,6 +630,54 @@ public:
         sit->second(Obj, Value);
     }
 
+    // ---- 继承信息查询 ----
+    [[nodiscard]] std::optional<std::string> baseOf(std::string_view Name) const
+    {
+        auto It = BaseOf.find(std::string(Name));
+        return It == BaseOf.end() ? std::nullopt : std::optional<std::string>{ It->second };
+    }
+
+    [[nodiscard]] std::vector<std::string> derivedOf(std::string_view Name) const
+    {
+        auto It = DerivedOf.find(std::string(Name));
+        return It == DerivedOf.end() ? std::vector<std::string>{} : It->second;
+    }
+
+    // 基类全链（自近及远，不含自身）
+    [[nodiscard]] std::vector<std::string> baseChainOf(std::string_view Name) const
+    {
+        std::vector<std::string> Chain;
+        std::string Cur{ Name };
+        while (auto B = baseOf(Cur))
+        {
+            Chain.push_back(*B);
+            Cur = *B;
+        }
+        return Chain;
+    }
+
+    // 是否（直接或间接）派生自 Base
+    [[nodiscard]] bool isDerivedFrom(std::string_view Name, std::string_view Base) const
+    {
+        std::string Cur{ Name };
+        while (auto B = baseOf(Cur))
+        {
+            if (*B == Base) return true;
+            Cur = *B;
+        }
+        return false;
+    }
+
+    [[nodiscard]] std::vector<std::string> typeNames() const
+    {
+        std::vector<std::string> Names;
+        Names.reserve(Types.size());
+        for (const auto &[K, V] : Types) Names.push_back(K);
+        return Names;
+    }
+
+    [[nodiscard]] std::size_t size() const noexcept { return Types.size(); }
+
 private:
     struct Entry
     {
@@ -624,7 +687,17 @@ private:
         std::unordered_map<std::string, Setter> Setters;
     };
     std::unordered_map<std::string, Entry> Types;
+    std::unordered_map<std::string, std::string> BaseOf;                  // 类型名 -> 直接基类名
+    std::unordered_map<std::string, std::vector<std::string>> DerivedOf;  // 基类名 -> 直接子类名
 };
+
+// ---- TypeInfo 的运行时继承查询实现（须在 ReflectRegistry 完整定义之后） ----
+template<typename Ty>
+std::vector<std::string> TypeInfo<Ty>::derivedNames() { return ReflectRegistry::self().derivedOf(Name); }
+template<typename Ty>
+std::vector<std::string> TypeInfo<Ty>::baseChain() { return ReflectRegistry::self().baseChainOf(Name); }
+template<typename Ty>
+bool TypeInfo<Ty>::isDerivedFrom(std::string_view Base) { return ReflectRegistry::self().isDerivedFrom(Name, Base); }
 
 // ========================= 由 TypeInfo<Ty> 生成工厂 / 调用表 / 成员表 =========================
 template<typename Ty>
@@ -683,12 +756,29 @@ void buildMembersInto(std::unordered_map<std::string, ReflectRegistry::Getter> &
 template<typename Ty>
 void registerReflect()
 {
+    constexpr std::string_view Name = TypeInfo<Ty>::Name;
+    if (ReflectRegistry::self().has(Name)) return; // 幂等：自动注册可能被多次触发（多 TU / 显式调用）
+
     auto Invokers = buildInvokers<Ty>();
     std::unordered_map<std::string, ReflectRegistry::Getter> Getters;
     std::unordered_map<std::string, ReflectRegistry::Setter> Setters;
     buildMembersInto<Ty>(Getters, Setters);
-    ReflectRegistry::self().registerEntry(TypeInfo<Ty>::Name, &factory<Ty>,
-                                          std::move(Invokers), std::move(Getters), std::move(Setters));
+    ReflectRegistry::self().registerEntry(Name, &factory<Ty>,
+                                          std::move(Invokers), std::move(Getters), std::move(Setters),
+                                          TypeInfo<Ty>::BaseName, TypeInfo<Ty>::HasBase);
+}
+
+// ========================= 自动注册 =========================
+// REFLECT_CLASS 展开出的 inline static 成员在本翻译单元的静态初始化阶段构造，
+// 其构造函数统一调用 registerReflect<Ty>()：无需为每个反射类型手写注册代码，
+// 且所有注册均在进入 main 之前完成。
+namespace detail
+{
+    template<typename Ty>
+    struct ReflectAutoRegistrar
+    {
+        ReflectAutoRegistrar() { registerReflect<Ty>(); }
+    };
 }
 
 } // namespace core
@@ -742,11 +832,13 @@ using ReflectNullBase = core::ReflectNullBase;
 #define PP_MAP_16(F,a,b,c,d,E,f,g,h,i,j,K,l,M,n,o,p) F(a), F(b), F(c), F(d), F(E), F(f), F(g), F(h), F(i), F(j), F(K), F(l), F(M), F(n), F(o), F(p)
 
 // 类元信息 + staticClass；须写在类内、先于 REFLECT_FIELDS / REFLECT_FUNCTIONS
+// reflect_registrar：静态初始化阶段自动调用 registerReflect<Type>()，无需手写注册
 #define REFLECT_CLASS(Type, ...)                              \
     static constexpr std::string_view reflect_name = #Type;   \
     using reflect_self = Type;                                \
     using reflect_base = REFLECT_FIRST(__VA_ARGS__);          \
-    static auto StaticClass() { return core::TypeInfo<Type>{}; }
+    static auto StaticClass() { return core::TypeInfo<Type>{}; } \
+    inline static const core::detail::ReflectAutoRegistrar<Type> reflect_registrar{}
 
 #define REFLECT_FIELD_DECL(P)  REFLECT_FIELD_DECL_I P
 #define REFLECT_FIELD_DECL_I(Ty, N) Ty N;
